@@ -1,0 +1,12 @@
+# build artifacts
+build/
+*.plugin
+DerivedData/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+
+# macOS
+.DS_Store
+
+# AE SDK (placed locally, not committed)
+AE_SDK/
