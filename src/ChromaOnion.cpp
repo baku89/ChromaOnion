@@ -234,12 +234,36 @@ Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_Layer
 
 	bool   deep      = PF_WORLD_IS_DEEP(output);
 
+	A_long maxDist = (before > after ? before : after);
+
 	/* Start from transparent black. */
 	ERR(PF_FILL(NULL, NULL, output));
 
-	A_long maxDist = (before > after ? before : after);
+	/*
+		Compositing differs by colour mode:
 
-	/* Build the ghost list (one frame per step of 1). */
+		Opacity : the current frame is the opaque base, and the ghost frames
+		          are overlaid on top at reduced opacity, so both stay visible
+		          even on opaque footage.
+
+		Chroma  : every frame — including the current one as the neutral middle
+		          (green) frame — is blended evenly and semi-transparently, so
+		          the rainbow overlap (past -> red, current -> green, future ->
+		          blue) reads through.
+	*/
+
+	/* Opacity mode: lay down the current frame as the opaque base first. */
+	if (!chroma && !err && params[CO_INPUT]->u.ld.data) {
+		GhostOptions o;
+		o.weight  = 1.0;
+		o.chroma  = false;
+		o.tintAmt = 0.0;
+		o.edge    = false;
+		o.tintR = o.tintG = o.tintB = 1.0;
+		CompositeDispatch(&params[CO_INPUT]->u.ld, output, deep, o);
+	}
+
+	/* Build the frame list (one frame per step of 1). */
 	std::vector<Ghost> ghosts;
 	for (A_long i = 1; i <= before; ++i) {
 		Ghost g;
@@ -257,6 +281,14 @@ Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_Layer
 		g.hue = (t + 1.0) * 0.5 * 240.0;	// future -> blue(240)
 		ghosts.push_back(g);
 	}
+	/* Chroma mode also blends the current frame, as the middle (green) frame. */
+	if (chroma) {
+		Ghost g;
+		g.signedFrames = 0;
+		g.dist         = 0;
+		g.hue          = 120.0;	// green = centre of the past->future sweep
+		ghosts.push_back(g);
+	}
 
 	/* Draw farthest first so nearer frames land on top. */
 	std::sort(ghosts.begin(), ghosts.end(),
@@ -265,15 +297,22 @@ Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_Layer
 	for (size_t n = 0; n < ghosts.size() && !err; ++n) {
 		const Ghost &g = ghosts[n];
 
-		PF_ParamDef cp;
-		AEFX_CLR_STRUCT(cp);
+		PF_ParamDef  cp;
+		bool         checked = false;
+		PF_EffectWorld *src  = NULL;
 
-		A_long when = in_data->current_time + g.signedFrames * in_data->time_step;
+		if (g.signedFrames == 0) {
+			src = &params[CO_INPUT]->u.ld;	// current frame, no checkout needed
+		} else {
+			AEFX_CLR_STRUCT(cp);
+			A_long when = in_data->current_time + g.signedFrames * in_data->time_step;
+			ERR(PF_CHECKOUT_PARAM(in_data, CO_INPUT, when,
+								  in_data->time_step, in_data->time_scale, &cp));
+			checked = true;
+			if (!err) src = &cp.u.ld;
+		}
 
-		ERR(PF_CHECKOUT_PARAM(in_data, CO_INPUT, when,
-							  in_data->time_step, in_data->time_scale, &cp));
-
-		if (!err && cp.u.ld.data) {
+		if (!err && src && src->data) {
 			GhostOptions o;
 			o.chroma  = chroma;
 			o.tintAmt = tintAmt;
@@ -282,15 +321,15 @@ Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_Layer
 
 			double w = onionOp;
 			if (fade && maxDist > 0) {
-				double frac = (double)g.dist / (double)maxDist;	// (0,1]
+				double frac = (double)g.dist / (double)maxDist;	// [0,1]
 				w *= (1.0 - 0.75 * frac);
 			}
 			o.weight = clamp01(w);
 
-			CompositeDispatch(&cp.u.ld, output, deep, o);
+			CompositeDispatch(src, output, deep, o);
 		}
 
-		ERR2(PF_CHECKIN_PARAM(in_data, &cp));
+		if (checked) ERR2(PF_CHECKIN_PARAM(in_data, &cp));
 	}
 
 	return err;
