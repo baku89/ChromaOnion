@@ -7,14 +7,15 @@ it is built for *checking animation*, not for trails:
 
 - **Independent before/after ranges** — choose how many frames to overlay on each
   side of the current time.
-- **Color modes**
-  - **Opacity** — plain reduced-opacity ghosting, with optional fade by distance.
-  - **Chroma** — frames are tinted along a **red (past) → green (now) → blue
+- **Tint** — a single slider that continuously cross-fades between two looks:
+  - **0 (Opacity)** — the current frame is the opaque base, ghost frames overlaid
+    at reduced opacity (fades by distance).
+  - **100 (Chroma)** — frames are tinted along a **red (past) → green (now) → blue
     (future)** sweep and combined **additively**, with per-channel masks normalized
     so that where all frames agree the original color is reconstructed. Motion shows
     up as colored fringes (e.g. 1 before + current + 1 after = exact R/G/B split).
-- **Edge Detect** — overlay edge detection so silhouettes/lines stay readable.
-  Combinable with either color mode.
+- **Edge Detect** — overlay high-contrast edge detection of the surrounding frames.
+  The current frame is left untouched and the neighbor edges are drawn on top.
 - Works on any layer as a normal effect (8- and 16-bpc).
 
 Status: **v0.1** — works on macOS (Apple Silicon / Intel, universal binary).
@@ -49,11 +50,11 @@ Restart After Effects; the effect appears under **Effect ▸ Utility ▸ ChromaO
 
 | Parameter | Meaning |
 |---|---|
-| Frames Before / After | How many frames to overlay on each side (0–30). |
-| Color Mode | **Opacity** (current frame as base, ghosts overlaid) or **Chroma** (additive red→green→blue). |
-| Onion Opacity | Opacity of the ghost frames (Opacity mode; cancels out in Chroma). |
+| Frames Before / After | How many frames to overlay on each side (0–30, default 1). |
+| Tint | 0 = Opacity look, 100 = Chroma (additive rainbow); cross-fades between them. Default 100. |
+| Onion Opacity | Opacity of the ghost frames (affects the Opacity end; cancels out at full Chroma). Default 100. |
 | Fade By Distance | Farther frames fade out (on by default). |
-| Edge Detect | Overlay edge detection instead of solid frames. |
+| Edge Detect | Overlay high-contrast edges of the surrounding frames; current frame left as-is. |
 
 ## How it works
 

@@ -38,8 +38,8 @@ resource 'PiPL' (16000) {
 		},
 		AE_Effect_Version {
 			/* MUST equal PF_VERSION(MAJOR,MINOR,BUG,STAGE,BUILD) in ChromaOnion.h.
-			   (subvers 1)<<15 | (build 3) = 32771  -> v0.1, develop build 3 */
-			32771
+			   (subvers 1)<<15 | (build 4) = 32772  -> v0.1, develop build 4 */
+			32772
 		},
 		AE_Effect_Info_Flags {
 			0

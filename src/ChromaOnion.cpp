@@ -76,14 +76,27 @@ static inline double SampleLuma(const PF_EffectWorld *w, int x, int y, double ma
 	return (0.299 * p->red + 0.587 * p->green + 0.114 * p->blue) / maxv;
 }
 
-/* Simple central-difference edge magnitude of luma, 0..~1. */
+/* Sobel edge magnitude of luma, 0..1, with a strong contrast curve. */
 template <typename PixT>
 static inline double EdgeMag(const PF_EffectWorld *w, int x, int y, double maxv)
 {
-	double gx = SampleLuma<PixT>(w, x + 1, y, maxv) - SampleLuma<PixT>(w, x - 1, y, maxv);
-	double gy = SampleLuma<PixT>(w, x, y + 1, maxv) - SampleLuma<PixT>(w, x, y - 1, maxv);
-	double mag = std::sqrt(gx * gx + gy * gy) * 3.0;	// gain so edges read clearly
-	return clamp01(mag);
+	double l00 = SampleLuma<PixT>(w, x - 1, y - 1, maxv);
+	double l10 = SampleLuma<PixT>(w, x,     y - 1, maxv);
+	double l20 = SampleLuma<PixT>(w, x + 1, y - 1, maxv);
+	double l01 = SampleLuma<PixT>(w, x - 1, y,     maxv);
+	double l21 = SampleLuma<PixT>(w, x + 1, y,     maxv);
+	double l02 = SampleLuma<PixT>(w, x - 1, y + 1, maxv);
+	double l12 = SampleLuma<PixT>(w, x,     y + 1, maxv);
+	double l22 = SampleLuma<PixT>(w, x + 1, y + 1, maxv);
+
+	double gx = (l20 + 2 * l21 + l22) - (l00 + 2 * l01 + l02);
+	double gy = (l02 + 2 * l12 + l22) - (l00 + 2 * l10 + l20);
+	double mag = std::sqrt(gx * gx + gy * gy) * 8.0;	// high gain
+
+	mag = clamp01(mag);
+	/* Contrast curve: push toward 0/1 so edges read as crisp lines. */
+	mag = mag * mag * (3.0 - 2.0 * mag);	// smoothstep
+	return mag;
 }
 
 /* Composite one source world onto the destination. */
@@ -214,8 +227,8 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_
 				  FRAMES_AFTER_DISK_ID);
 
 	AEFX_CLR_STRUCT(def);
-	PF_ADD_POPUP("Color Mode", 2, COLOR_MODE_OPACITY,
-				 "Opacity|Chroma", COLOR_MODE_DISK_ID);
+	PF_ADD_SLIDER("Tint", TINT_MIN, TINT_MAX,
+				  TINT_MIN, TINT_MAX, TINT_DFLT, TINT_DISK_ID);
 
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_SLIDER("Onion Opacity", ONION_OPACITY_MIN, ONION_OPACITY_MAX,
@@ -239,42 +252,63 @@ struct Ghost {
 	double	weight;			// onion opacity * distance fade
 };
 
+/* dst = a*(1-t) + b*t, straight per-channel. a may alias dst. */
+template <typename PixT>
+static void LerpWorldT(const PF_EffectWorld *a, const PF_EffectWorld *b,
+					   PF_EffectWorld *dst, double maxv, double t)
+{
+	int width  = dst->width;
+	int height = dst->height;
+	if (a->width  < width)  width  = a->width;
+	if (b->width  < width)  width  = b->width;
+	if (a->height < height) height = a->height;
+	if (b->height < height) height = b->height;
+
+	double it = 1.0 - t;
+	for (int y = 0; y < height; ++y) {
+		const PixT *ar = (const PixT *)((const char *)a->data + (size_t)y * a->rowbytes);
+		const PixT *br = (const PixT *)((const char *)b->data + (size_t)y * b->rowbytes);
+		PixT       *dr = (PixT *)((char *)dst->data + (size_t)y * dst->rowbytes);
+		for (int x = 0; x < width; ++x) {
+			dr[x].alpha = (decltype(dr[x].alpha))(clamp01((ar[x].alpha * it + br[x].alpha * t) / maxv) * maxv + 0.5);
+			dr[x].red   = (decltype(dr[x].red))  (clamp01((ar[x].red   * it + br[x].red   * t) / maxv) * maxv + 0.5);
+			dr[x].green = (decltype(dr[x].green))(clamp01((ar[x].green * it + br[x].green * t) / maxv) * maxv + 0.5);
+			dr[x].blue  = (decltype(dr[x].blue)) (clamp01((ar[x].blue  * it + br[x].blue  * t) / maxv) * maxv + 0.5);
+		}
+	}
+}
+
+static void LerpWorld(const PF_EffectWorld *a, const PF_EffectWorld *b,
+					  PF_EffectWorld *dst, bool deep, double t)
+{
+	if (deep) LerpWorldT<PF_Pixel16>(a, b, dst, (double)PF_MAX_CHAN16, t);
+	else      LerpWorldT<PF_Pixel8> (a, b, dst, (double)PF_MAX_CHAN8,  t);
+}
+
+/*
+	Render one onion-skin look into dst.
+
+	chroma == false (Opacity): the current frame is the opaque base, ghost frames
+	         are overlaid "over" at reduced opacity.
+
+	chroma == true  (Chroma): every frame — including the current one as the
+	         middle (green) frame — is tinted red(past)->green(now)->blue(future)
+	         and combined ADDITIVELY, with per-channel masks normalised so that
+	         where all frames agree the original colour is reconstructed and
+	         motion shows as coloured fringes.
+
+	The continuous Tint parameter cross-fades between these two looks.
+*/
 static PF_Err
-Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_LayerDef *output)
+Compose(PF_InData *in_data, PF_ParamDef *params[], PF_EffectWorld *dst, bool deep,
+		A_long before, A_long after, double onionOp, bool fade, bool edge, bool chroma)
 {
 	PF_Err err = PF_Err_NONE, err2 = PF_Err_NONE;
-
-	A_long before  = params[CO_FRAMES_BEFORE]->u.sd.value;
-	A_long after   = params[CO_FRAMES_AFTER]->u.sd.value;
-
-	A_long colorMode = params[CO_COLOR_MODE]->u.pd.value;
-	double onionOp   = params[CO_ONION_OPACITY]->u.sd.value / 100.0;
-	bool   fade      = params[CO_FADE_BY_DISTANCE]->u.bd.value != 0;
-	bool   edge      = params[CO_EDGE_DETECT]->u.bd.value != 0;
-	bool   chroma    = (colorMode == COLOR_MODE_CHROMA);
-
-	bool   deep      = PF_WORLD_IS_DEEP(output);
 
 	A_long maxDist = (before > after ? before : after);
 
 	/* Start from transparent black. */
-	ERR(PF_FILL(NULL, NULL, output));
-
-	/*
-		Compositing differs by colour mode:
-
-		Opacity : the current frame is the opaque base, and the ghost frames are
-		          overlaid on top ("over") at reduced opacity, so both stay
-		          visible even on opaque footage.
-
-		Chroma  : every frame — including the current one as the middle (green)
-		          frame — is tinted along a red(past)->green(now)->blue(future)
-		          sweep and combined ADDITIVELY. The per-channel masks are
-		          normalised so that, where all frames agree, they sum to 1 and
-		          the original colour is reconstructed; motion shows as coloured
-		          fringes. (Onion Opacity cancels out under this normalisation,
-		          so it only affects Opacity mode.)
-	*/
+	ERR(PF_FILL(NULL, NULL, dst));
 
 	/* Opacity mode: lay down the current frame as the opaque base first. */
 	if (!chroma && !err && params[CO_INPUT]->u.ld.data) {
@@ -283,7 +317,7 @@ Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_Layer
 		o.mode   = COMP_OVER;
 		o.weight = 1.0;
 		o.edge   = false;
-		CompositeDispatch(&params[CO_INPUT]->u.ld, output, deep, o);
+		CompositeDispatch(&params[CO_INPUT]->u.ld, dst, deep, o);
 	}
 
 	/* Build the frame list (one frame per step of 1). */
@@ -361,7 +395,9 @@ Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_Layer
 		if (!err && src && src->data) {
 			GhostOptions o;
 			AEFX_CLR_STRUCT(o);
-			o.edge = edge;
+			/* The current frame is shown as-is; only the surrounding frames
+			   get edge detection, overlaid on top of it. */
+			o.edge = edge && (g.signedFrames != 0);
 
 			if (chroma) {
 				o.mode = COMP_ADD;
@@ -376,10 +412,49 @@ Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_Layer
 				o.weight = g.weight;
 			}
 
-			CompositeDispatch(src, output, deep, o);
+			CompositeDispatch(src, dst, deep, o);
 		}
 
 		if (checked) ERR2(PF_CHECKIN_PARAM(in_data, &cp));
+	}
+
+	return err;
+}
+
+static PF_Err
+Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_LayerDef *output)
+{
+	PF_Err err = PF_Err_NONE;
+
+	A_long before  = params[CO_FRAMES_BEFORE]->u.sd.value;
+	A_long after   = params[CO_FRAMES_AFTER]->u.sd.value;
+	double tint    = params[CO_TINT]->u.sd.value / 100.0;	// 0 = Opacity, 1 = Chroma
+	double onionOp = params[CO_ONION_OPACITY]->u.sd.value / 100.0;
+	bool   fade    = params[CO_FADE_BY_DISTANCE]->u.bd.value != 0;
+	bool   edge    = params[CO_EDGE_DETECT]->u.bd.value != 0;
+	bool   deep    = PF_WORLD_IS_DEEP(output);
+
+	const double EPS = 0.001;
+
+	if (tint <= EPS) {
+		err = Compose(in_data, params, output, deep, before, after, onionOp, fade, edge, false);
+	} else if (tint >= 1.0 - EPS) {
+		err = Compose(in_data, params, output, deep, before, after, onionOp, fade, edge, true);
+	} else {
+		/* Cross-fade: Opacity look in output, Chroma look in a temp world. */
+		err = Compose(in_data, params, output, deep, before, after, onionOp, fade, edge, false);
+
+		if (!err) {
+			PF_EffectWorld temp;
+			AEFX_CLR_STRUCT(temp);
+			PF_NewWorldFlags flags = (PF_NewWorldFlags)(deep ? PF_NewWorldFlag_DEEP_PIXELS : PF_NewWorldFlag_NONE);
+			err = PF_NEW_WORLD(output->width, output->height, flags, &temp);
+			if (!err) {
+				err = Compose(in_data, params, &temp, deep, before, after, onionOp, fade, edge, true);
+				if (!err) LerpWorld(output, &temp, output, deep, tint);
+				PF_DISPOSE_WORLD(&temp);
+			}
+		}
 	}
 
 	return err;
