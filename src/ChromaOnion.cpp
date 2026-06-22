@@ -57,6 +57,7 @@ enum CompMode {
 struct GhostOptions {
 	CompMode	mode;
 	bool		edge;		// edge-detection overlay
+	double		edgeGain;	// edge detection gain
 
 	/* COMP_OVER */
 	double		weight;		// source alpha multiplier 0..1
@@ -76,9 +77,9 @@ static inline double SampleLuma(const PF_EffectWorld *w, int x, int y, double ma
 	return (0.299 * p->red + 0.587 * p->green + 0.114 * p->blue) / maxv;
 }
 
-/* Sobel edge magnitude of luma, 0..1, with a strong contrast curve. */
+/* Sobel edge magnitude of luma, 0..1, scaled by gain. */
 template <typename PixT>
-static inline double EdgeMag(const PF_EffectWorld *w, int x, int y, double maxv)
+static inline double EdgeMag(const PF_EffectWorld *w, int x, int y, double maxv, double gain)
 {
 	double l00 = SampleLuma<PixT>(w, x - 1, y - 1, maxv);
 	double l10 = SampleLuma<PixT>(w, x,     y - 1, maxv);
@@ -91,7 +92,7 @@ static inline double EdgeMag(const PF_EffectWorld *w, int x, int y, double maxv)
 
 	double gx = (l20 + 2 * l21 + l22) - (l00 + 2 * l01 + l02);
 	double gy = (l02 + 2 * l12 + l22) - (l00 + 2 * l10 + l20);
-	double mag = std::sqrt(gx * gx + gy * gy) * 2.0;	// moderate gain
+	double mag = std::sqrt(gx * gx + gy * gy) * gain;
 	return clamp01(mag);
 }
 
@@ -117,7 +118,7 @@ static void CompositeWorld(const PF_EffectWorld *src,
 			double sg = sp->green / maxv;
 			double sb = sp->blue  / maxv;
 
-			double e = o.edge ? EdgeMag<PixT>(src, x, y, maxv) : 1.0;
+			double e = o.edge ? EdgeMag<PixT>(src, x, y, maxv, o.edgeGain) : 1.0;
 
 			PixT  *dp = drow + x;
 			double da = dp->alpha / maxv;
@@ -237,6 +238,13 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_CHECKBOX("Edge Detect", "", FALSE, 0, EDGE_DETECT_DISK_ID);
 
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_FLOAT_SLIDERX("Edge Intensity",
+						 EDGE_INTENSITY_MIN, EDGE_INTENSITY_MAX,
+						 EDGE_INTENSITY_MIN, EDGE_INTENSITY_MAX,
+						 EDGE_INTENSITY_DFLT, 1, PF_ValueDisplayFlag_NONE, 0,
+						 EDGE_INTENSITY_DISK_ID);
+
 	out_data->num_params = CO_NUM_PARAMS;
 	return err;
 }
@@ -297,7 +305,8 @@ static void LerpWorld(const PF_EffectWorld *a, const PF_EffectWorld *b,
 */
 static PF_Err
 Compose(PF_InData *in_data, PF_ParamDef *params[], PF_EffectWorld *dst, bool deep,
-		A_long before, A_long after, double onionOp, bool fade, bool edge, bool chroma)
+		A_long before, A_long after, double onionOp, bool fade, bool edge,
+		double edgeGain, bool chroma)
 {
 	PF_Err err = PF_Err_NONE, err2 = PF_Err_NONE;
 
@@ -306,8 +315,17 @@ Compose(PF_InData *in_data, PF_ParamDef *params[], PF_EffectWorld *dst, bool dee
 	/* Start from transparent black. */
 	ERR(PF_FILL(NULL, NULL, dst));
 
-	/* Opacity mode: lay down the current frame as the opaque base first. */
-	if (!chroma && !err && params[CO_INPUT]->u.ld.data) {
+	/*
+		Lay down the current frame as an opaque, untinted base when:
+		  - Opacity mode (always), or
+		  - Edge Detect is on (so the current frame stays as-is and the
+		    surrounding frames' edges are overlaid on top — never green-tinted).
+		Otherwise (pure Chroma) the current frame is blended into the additive
+		stack as the middle/green frame instead.
+	*/
+	bool currentAsBase = (!chroma) || edge;
+
+	if (currentAsBase && !err && params[CO_INPUT]->u.ld.data) {
 		GhostOptions o;
 		AEFX_CLR_STRUCT(o);
 		o.mode   = COMP_OVER;
@@ -334,8 +352,9 @@ Compose(PF_InData *in_data, PF_ParamDef *params[], PF_EffectWorld *dst, bool dee
 		g.hue = (t + 1.0) * 0.5 * 240.0;	// future -> blue(240)
 		ghosts.push_back(g);
 	}
-	/* Chroma mode also blends the current frame, as the middle (green) frame. */
-	if (chroma) {
+	/* Pure Chroma blends the current frame as the middle (green) frame. When it
+	   is drawn as the untinted base (Opacity, or Edge Detect) we skip it here. */
+	if (chroma && !currentAsBase) {
 		Ghost g;
 		g.signedFrames = 0;
 		g.dist         = 0;
@@ -393,7 +412,8 @@ Compose(PF_InData *in_data, PF_ParamDef *params[], PF_EffectWorld *dst, bool dee
 			AEFX_CLR_STRUCT(o);
 			/* The current frame is shown as-is; only the surrounding frames
 			   get edge detection, overlaid on top of it. */
-			o.edge = edge && (g.signedFrames != 0);
+			o.edge     = edge && (g.signedFrames != 0);
+			o.edgeGain = edgeGain;
 
 			if (chroma) {
 				o.mode = COMP_ADD;
@@ -428,17 +448,18 @@ Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_Layer
 	double onionOp = params[CO_ONION_OPACITY]->u.sd.value / 100.0;
 	bool   fade    = params[CO_FADE_BY_DISTANCE]->u.bd.value != 0;
 	bool   edge    = params[CO_EDGE_DETECT]->u.bd.value != 0;
+	double edgeGn  = params[CO_EDGE_INTENSITY]->u.fs_d.value;
 	bool   deep    = PF_WORLD_IS_DEEP(output);
 
 	const double EPS = 0.001;
 
 	if (tint <= EPS) {
-		err = Compose(in_data, params, output, deep, before, after, onionOp, fade, edge, false);
+		err = Compose(in_data, params, output, deep, before, after, onionOp, fade, edge, edgeGn, false);
 	} else if (tint >= 1.0 - EPS) {
-		err = Compose(in_data, params, output, deep, before, after, onionOp, fade, edge, true);
+		err = Compose(in_data, params, output, deep, before, after, onionOp, fade, edge, edgeGn, true);
 	} else {
 		/* Cross-fade: Opacity look in output, Chroma look in a temp world. */
-		err = Compose(in_data, params, output, deep, before, after, onionOp, fade, edge, false);
+		err = Compose(in_data, params, output, deep, before, after, onionOp, fade, edge, edgeGn, false);
 
 		if (!err) {
 			PF_EffectWorld temp;
@@ -446,7 +467,7 @@ Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_Layer
 			PF_NewWorldFlags flags = (PF_NewWorldFlags)(deep ? PF_NewWorldFlag_DEEP_PIXELS : PF_NewWorldFlag_NONE);
 			err = PF_NEW_WORLD(output->width, output->height, flags, &temp);
 			if (!err) {
-				err = Compose(in_data, params, &temp, deep, before, after, onionOp, fade, edge, true);
+				err = Compose(in_data, params, &temp, deep, before, after, onionOp, fade, edge, edgeGn, true);
 				if (!err) LerpWorld(output, &temp, output, deep, tint);
 				PF_DISPOSE_WORLD(&temp);
 			}

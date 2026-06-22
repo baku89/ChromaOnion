@@ -26,7 +26,7 @@
 #define MINOR_VERSION	1
 #define BUG_VERSION		0
 #define STAGE_VERSION	PF_Stage_DEVELOP
-#define BUILD_VERSION	4
+#define BUILD_VERSION	5
 
 #define NAME			"ChromaOnion"
 #define DESCRIPTION		"Onion-skin preview: composite frames before/after the current time, \
@@ -43,6 +43,7 @@ enum {
 	CO_ONION_OPACITY,	// 0..100
 	CO_FADE_BY_DISTANCE,// checkbox
 	CO_EDGE_DETECT,		// checkbox
+	CO_EDGE_INTENSITY,	// float slider (edge gain)
 	CO_NUM_PARAMS
 };
 
@@ -53,7 +54,8 @@ enum {
 	TINT_DISK_ID = 7,
 	ONION_OPACITY_DISK_ID = 5,
 	FADE_BY_DISTANCE_DISK_ID = 6,
-	EDGE_DETECT_DISK_ID = 8
+	EDGE_DETECT_DISK_ID = 8,
+	EDGE_INTENSITY_DISK_ID = 9
 };
 
 /* Parameter ranges. */
@@ -72,6 +74,10 @@ enum {
 #define ONION_OPACITY_MIN	0
 #define ONION_OPACITY_MAX	100
 #define ONION_OPACITY_DFLT	100
+
+#define EDGE_INTENSITY_MIN	0.0
+#define EDGE_INTENSITY_MAX	8.0
+#define EDGE_INTENSITY_DFLT	2.0
 
 extern "C" {
 
