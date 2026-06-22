@@ -9,9 +9,10 @@ it is built for *checking animation*, not for trails:
   side of the current time.
 - **Color modes**
   - **Opacity** — plain reduced-opacity ghosting, with optional fade by distance.
-  - **Chroma (Rainbow)** — past frames are tinted toward **red**, future frames
-    toward **blue** (a rainbow sweep through the range), so motion direction reads
-    as color.
+  - **Chroma** — frames are tinted along a **red (past) → green (now) → blue
+    (future)** sweep and combined **additively**, with per-channel masks normalized
+    so that where all frames agree the original color is reconstructed. Motion shows
+    up as colored fringes (e.g. 1 before + current + 1 after = exact R/G/B split).
 - **Edge Detect** — overlay edge detection so silhouettes/lines stay readable.
   Combinable with either color mode.
 - Works on any layer as a normal effect (8- and 16-bpc).
@@ -49,22 +50,18 @@ Restart After Effects; the effect appears under **Effect ▸ Utility ▸ ChromaO
 | Parameter | Meaning |
 |---|---|
 | Frames Before / After | How many frames to overlay on each side (0–30). |
-| Color Mode | Opacity, or Chroma (rainbow past→red / future→blue). |
-| Onion Opacity | Overall opacity of the ghost frames. |
-| Fade By Distance | Farther frames fade out. |
-| Tint Amount | Strength of the chroma tint. |
+| Color Mode | **Opacity** (current frame as base, ghosts overlaid) or **Chroma** (additive red→green→blue). |
+| Onion Opacity | Opacity of the ghost frames (Opacity mode; cancels out in Chroma). |
+| Fade By Distance | Farther frames fade out (on by default). |
 | Edge Detect | Overlay edge detection instead of solid frames. |
-
-The current frame itself is not drawn — only the surrounding ghost frames — so the
-onion skin stays visible even on opaque footage. Apply on an adjustment layer (or a
-layer above your footage) to see ghosts over the live frame.
 
 ## How it works
 
 ChromaOnion is a classic (non-Smart) effect that sets `PF_OutFlag_WIDE_TIME_INPUT`
 and checks out its input layer at `current_time ± n · frame` via `PF_CHECKOUT_PARAM`,
-then composites each frame ("source over") with per-frame weight, tint, and optional
-edge detection. See `src/ChromaOnion.cpp`.
+then composites each frame — "source over" in Opacity mode, or an additive
+channel-masked blend in Chroma mode — with optional edge detection.
+See `src/ChromaOnion.cpp`.
 
 ## Layout
 
