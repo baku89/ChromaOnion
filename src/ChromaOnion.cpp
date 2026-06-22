@@ -49,12 +49,22 @@ static void HueToRGB(double hue, double *r, double *g, double *b)
 	}
 }
 
+enum CompMode {
+	COMP_OVER,	// source-over with alpha (Opacity mode + current base)
+	COMP_ADD	// additive, channel-masked (Chroma mode)
+};
+
 struct GhostOptions {
-	double	weight;		// overall alpha multiplier 0..1
-	bool	chroma;		// apply rainbow tint
-	double	tintAmt;	// 0..1
-	bool	edge;		// edge-detection overlay
-	double	tintR, tintG, tintB;	// tint colour (chroma)
+	CompMode	mode;
+	bool		edge;		// edge-detection overlay
+
+	/* COMP_OVER */
+	double		weight;		// source alpha multiplier 0..1
+
+	/* COMP_ADD: per-channel mask (already normalised so the weighted sum of all
+	   frames' masks is 1 per channel) and an alpha weight. */
+	double		maskR, maskG, maskB;
+	double		alphaW;
 };
 
 template <typename PixT>
@@ -76,7 +86,7 @@ static inline double EdgeMag(const PF_EffectWorld *w, int x, int y, double maxv)
 	return clamp01(mag);
 }
 
-/* Composite one checked-out source world onto the destination ("source over"). */
+/* Composite one source world onto the destination. */
 template <typename PixT>
 static void CompositeWorld(const PF_EffectWorld *src,
 						   PF_EffectWorld       *dst,
@@ -98,40 +108,56 @@ static void CompositeWorld(const PF_EffectWorld *src,
 			double sg = sp->green / maxv;
 			double sb = sp->blue  / maxv;
 
-			double cr = sr, cg = sg, cb = sb, ca = sa;
+			double e = o.edge ? EdgeMag<PixT>(src, x, y, maxv) : 1.0;
 
-			if (o.edge) {
-				double e = EdgeMag<PixT>(src, x, y, maxv);
-				ca = sa * e;					// edges only, where the frame is opaque
-				if (o.chroma) { cr = o.tintR; cg = o.tintG; cb = o.tintB; }
-				else          { cr = cg = cb = 1.0; }
-			} else if (o.chroma) {
-				double L  = 0.299 * sr + 0.587 * sg + 0.114 * sb;
-				double tr = L * o.tintR, tg = L * o.tintG, tb = L * o.tintB;
-				cr = sr + (tr - sr) * o.tintAmt;
-				cg = sg + (tg - sg) * o.tintAmt;
-				cb = sb + (tb - sb) * o.tintAmt;
-			}
-
-			double ae = ca * o.weight;
-			if (ae <= 0.0) continue;
-
-			PixT *dp = drow + x;
+			PixT  *dp = drow + x;
 			double da = dp->alpha / maxv;
 			double dr = dp->red   / maxv;
 			double dg = dp->green / maxv;
 			double db = dp->blue  / maxv;
 
-			double inv = 1.0 - ae;
-			double oa = ae + da * inv;
-			double orr = cr * ae + dr * inv;
-			double og  = cg * ae + dg * inv;
-			double ob  = cb * ae + db * inv;
+			if (o.mode == COMP_ADD) {
+				/* Additive, channel-masked. Where every frame agrees the masks
+				   sum to 1 per channel, so the original colour is reconstructed;
+				   motion shows up as coloured fringes. */
+				double base_r, base_g, base_b, aIn;
+				if (o.edge) {
+					base_r = base_g = base_b = e;	// coloured edges
+					aIn = sa * e;
+				} else {
+					base_r = sr; base_g = sg; base_b = sb;
+					aIn = sa;
+				}
+				double orr = dr + base_r * o.maskR;
+				double og  = dg + base_g * o.maskG;
+				double ob  = db + base_b * o.maskB;
+				double oa  = da + aIn * o.alphaW;
 
-			dp->alpha = (decltype(dp->alpha))(clamp01(oa)  * maxv + 0.5);
-			dp->red   = (decltype(dp->red))  (clamp01(orr) * maxv + 0.5);
-			dp->green = (decltype(dp->green))(clamp01(og)  * maxv + 0.5);
-			dp->blue  = (decltype(dp->blue)) (clamp01(ob)  * maxv + 0.5);
+				dp->alpha = (decltype(dp->alpha))(clamp01(oa)  * maxv + 0.5);
+				dp->red   = (decltype(dp->red))  (clamp01(orr) * maxv + 0.5);
+				dp->green = (decltype(dp->green))(clamp01(og)  * maxv + 0.5);
+				dp->blue  = (decltype(dp->blue)) (clamp01(ob)  * maxv + 0.5);
+			} else {
+				/* Source-over. */
+				double cr = sr, cg = sg, cb = sb, ca = sa;
+				if (o.edge) {
+					ca = sa * e;
+					cr = cg = cb = 1.0;		// white edges
+				}
+				double ae = ca * o.weight;
+				if (ae <= 0.0) continue;
+
+				double inv = 1.0 - ae;
+				double oa  = ae + da * inv;
+				double orr = cr * ae + dr * inv;
+				double og  = cg * ae + dg * inv;
+				double ob  = cb * ae + db * inv;
+
+				dp->alpha = (decltype(dp->alpha))(clamp01(oa)  * maxv + 0.5);
+				dp->red   = (decltype(dp->red))  (clamp01(orr) * maxv + 0.5);
+				dp->green = (decltype(dp->green))(clamp01(og)  * maxv + 0.5);
+				dp->blue  = (decltype(dp->blue)) (clamp01(ob)  * maxv + 0.5);
+			}
 		}
 	}
 }
@@ -189,7 +215,7 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_
 
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_POPUP("Color Mode", 2, COLOR_MODE_OPACITY,
-				 "Opacity|Chroma (Rainbow)", COLOR_MODE_DISK_ID);
+				 "Opacity|Chroma", COLOR_MODE_DISK_ID);
 
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_SLIDER("Onion Opacity", ONION_OPACITY_MIN, ONION_OPACITY_MAX,
@@ -198,11 +224,6 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_
 
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_CHECKBOX("Fade By Distance", "", TRUE, 0, FADE_BY_DISTANCE_DISK_ID);
-
-	AEFX_CLR_STRUCT(def);
-	PF_ADD_SLIDER("Tint Amount", TINT_AMOUNT_MIN, TINT_AMOUNT_MAX,
-				  TINT_AMOUNT_MIN, TINT_AMOUNT_MAX, TINT_AMOUNT_DFLT,
-				  TINT_AMOUNT_DISK_ID);
 
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_CHECKBOX("Edge Detect", "", FALSE, 0, EDGE_DETECT_DISK_ID);
@@ -214,7 +235,8 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_
 struct Ghost {
 	A_long	signedFrames;	// offset in frames (negative = past)
 	A_long	dist;			// absolute distance in frames
-	double	hue;			// tint hue
+	double	hue;			// tint hue (Chroma)
+	double	weight;			// onion opacity * distance fade
 };
 
 static PF_Err
@@ -228,7 +250,6 @@ Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_Layer
 	A_long colorMode = params[CO_COLOR_MODE]->u.pd.value;
 	double onionOp   = params[CO_ONION_OPACITY]->u.sd.value / 100.0;
 	bool   fade      = params[CO_FADE_BY_DISTANCE]->u.bd.value != 0;
-	double tintAmt   = params[CO_TINT_AMOUNT]->u.sd.value / 100.0;
 	bool   edge      = params[CO_EDGE_DETECT]->u.bd.value != 0;
 	bool   chroma    = (colorMode == COLOR_MODE_CHROMA);
 
@@ -242,24 +263,26 @@ Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_Layer
 	/*
 		Compositing differs by colour mode:
 
-		Opacity : the current frame is the opaque base, and the ghost frames
-		          are overlaid on top at reduced opacity, so both stay visible
-		          even on opaque footage.
+		Opacity : the current frame is the opaque base, and the ghost frames are
+		          overlaid on top ("over") at reduced opacity, so both stay
+		          visible even on opaque footage.
 
-		Chroma  : every frame — including the current one as the neutral middle
-		          (green) frame — is blended evenly and semi-transparently, so
-		          the rainbow overlap (past -> red, current -> green, future ->
-		          blue) reads through.
+		Chroma  : every frame — including the current one as the middle (green)
+		          frame — is tinted along a red(past)->green(now)->blue(future)
+		          sweep and combined ADDITIVELY. The per-channel masks are
+		          normalised so that, where all frames agree, they sum to 1 and
+		          the original colour is reconstructed; motion shows as coloured
+		          fringes. (Onion Opacity cancels out under this normalisation,
+		          so it only affects Opacity mode.)
 	*/
 
 	/* Opacity mode: lay down the current frame as the opaque base first. */
 	if (!chroma && !err && params[CO_INPUT]->u.ld.data) {
 		GhostOptions o;
-		o.weight  = 1.0;
-		o.chroma  = false;
-		o.tintAmt = 0.0;
-		o.edge    = false;
-		o.tintR = o.tintG = o.tintB = 1.0;
+		AEFX_CLR_STRUCT(o);
+		o.mode   = COMP_OVER;
+		o.weight = 1.0;
+		o.edge   = false;
 		CompositeDispatch(&params[CO_INPUT]->u.ld, output, deep, o);
 	}
 
@@ -290,16 +313,39 @@ Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_Layer
 		ghosts.push_back(g);
 	}
 
-	/* Draw farthest first so nearer frames land on top. */
+	/* Per-frame weight (onion opacity * distance fade). */
+	for (size_t n = 0; n < ghosts.size(); ++n) {
+		double w = onionOp;
+		if (fade && maxDist > 0) {
+			double frac = (double)ghosts[n].dist / (double)maxDist;	// [0,1]
+			w *= (1.0 - 0.75 * frac);
+		}
+		ghosts[n].weight = clamp01(w);
+	}
+
+	/* Chroma: accumulate the per-channel mask normaliser so identical frames
+	   reconstruct the original colour. */
+	double sMaskR = 0, sMaskG = 0, sMaskB = 0, sumW = 0;
+	if (chroma) {
+		for (size_t n = 0; n < ghosts.size(); ++n) {
+			double mr, mg, mb;
+			HueToRGB(ghosts[n].hue, &mr, &mg, &mb);
+			double w = ghosts[n].weight;
+			sMaskR += mr * w; sMaskG += mg * w; sMaskB += mb * w;
+			sumW   += w;
+		}
+	}
+
+	/* Draw farthest first so nearer frames land on top (matters for "over"). */
 	std::sort(ghosts.begin(), ghosts.end(),
 			  [](const Ghost &a, const Ghost &b) { return a.dist > b.dist; });
 
 	for (size_t n = 0; n < ghosts.size() && !err; ++n) {
 		const Ghost &g = ghosts[n];
 
-		PF_ParamDef  cp;
-		bool         checked = false;
-		PF_EffectWorld *src  = NULL;
+		PF_ParamDef     cp;
+		bool            checked = false;
+		PF_EffectWorld *src     = NULL;
 
 		if (g.signedFrames == 0) {
 			src = &params[CO_INPUT]->u.ld;	// current frame, no checkout needed
@@ -314,17 +360,21 @@ Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_Layer
 
 		if (!err && src && src->data) {
 			GhostOptions o;
-			o.chroma  = chroma;
-			o.tintAmt = tintAmt;
-			o.edge    = edge;
-			HueToRGB(g.hue, &o.tintR, &o.tintG, &o.tintB);
+			AEFX_CLR_STRUCT(o);
+			o.edge = edge;
 
-			double w = onionOp;
-			if (fade && maxDist > 0) {
-				double frac = (double)g.dist / (double)maxDist;	// [0,1]
-				w *= (1.0 - 0.75 * frac);
+			if (chroma) {
+				o.mode = COMP_ADD;
+				double mr, mg, mb;
+				HueToRGB(g.hue, &mr, &mg, &mb);
+				o.maskR  = (sMaskR > 1e-6) ? mr * g.weight / sMaskR : 0.0;
+				o.maskG  = (sMaskG > 1e-6) ? mg * g.weight / sMaskG : 0.0;
+				o.maskB  = (sMaskB > 1e-6) ? mb * g.weight / sMaskB : 0.0;
+				o.alphaW = (sumW   > 1e-6) ? g.weight / sumW         : 0.0;
+			} else {
+				o.mode   = COMP_OVER;
+				o.weight = g.weight;
 			}
-			o.weight = clamp01(w);
 
 			CompositeDispatch(src, output, deep, o);
 		}
