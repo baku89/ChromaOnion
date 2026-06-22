@@ -38,8 +38,8 @@ resource 'PiPL' (16000) {
 		},
 		AE_Effect_Version {
 			/* MUST equal PF_VERSION(MAJOR,MINOR,BUG,STAGE,BUILD) in ChromaOnion.h.
-			   (subvers 1)<<15 | (build 5) = 32773  -> v0.1, develop build 5 */
-			32773
+			   (subvers 1)<<15 | (build 6) = 32774  -> v0.1, develop build 6 */
+			32774
 		},
 		AE_Effect_Info_Flags {
 			0
@@ -48,7 +48,9 @@ resource 'PiPL' (16000) {
 			33554434	/* WIDE_TIME_INPUT | DEEP_COLOR_AWARE */
 		},
 		AE_Effect_Global_OutFlags_2 {
-			0x8000000	/* SUPPORTS_THREADED_RENDERING */
+			/* SUPPORTS_SMART_RENDER(1<<10) | FLOAT_COLOR_AWARE(1<<12) |
+			   SUPPORTS_THREADED_RENDERING(1<<27) = 134222848 */
+			134222848
 		},
 		AE_Effect_Match_Name {
 			"BAKU ChromaOnion"

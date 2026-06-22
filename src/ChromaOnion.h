@@ -26,7 +26,7 @@
 #define MINOR_VERSION	1
 #define BUG_VERSION		0
 #define STAGE_VERSION	PF_Stage_DEVELOP
-#define BUILD_VERSION	5
+#define BUILD_VERSION	6
 
 #define NAME			"ChromaOnion"
 #define DESCRIPTION		"Onion-skin preview: composite frames before/after the current time, \
@@ -88,7 +88,8 @@ extern "C" {
 		PF_InData		*in_data,
 		PF_OutData		*out_data,
 		PF_ParamDef		*params[],
-		PF_LayerDef		*output );
+		PF_LayerDef		*output,
+		void			*extra );
 
 }
 

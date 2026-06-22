@@ -16,7 +16,7 @@ it is built for *checking animation*, not for trails:
     up as colored fringes (e.g. 1 before + current + 1 after = exact R/G/B split).
 - **Edge Detect** — overlay high-contrast edge detection of the surrounding frames.
   The current frame is left untouched and the neighbor edges are drawn on top.
-- Works on any layer as a normal effect (8- and 16-bpc).
+- Works on any layer as a SmartFX effect (8-, 16- and 32-bpc float).
 
 Status: **v0.1** — works on macOS (Apple Silicon / Intel, universal binary).
 
@@ -58,10 +58,11 @@ Restart After Effects; the effect appears under **Effect ▸ Utility ▸ ChromaO
 
 ## How it works
 
-ChromaOnion is a classic (non-Smart) effect that sets `PF_OutFlag_WIDE_TIME_INPUT`
-and checks out its input layer at `current_time ± n · frame` via `PF_CHECKOUT_PARAM`,
-then composites each frame — "source over" in Opacity mode, or an additive
-channel-masked blend in Chroma mode — with optional edge detection.
+ChromaOnion is a SmartFX effect. In `SMART_PRE_RENDER` it checks out the input
+layer at `current_time ± n · frame` (one checkout per frame, unioning the result
+rects); in `SMART_RENDER` it composites each frame — "source over" in Opacity mode,
+or an additive channel-masked blend in Chroma mode — at 8/16/32-bpc, with optional
+edge detection. Being SmartFX is what enables 32-bpc float support.
 See `src/ChromaOnion.cpp`.
 
 ## Layout

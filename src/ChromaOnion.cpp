@@ -16,10 +16,12 @@
 */
 
 #include "ChromaOnion.h"
+#include "AE_EffectCBSuites.h"
 
 #include <vector>
 #include <algorithm>
 #include <cmath>
+#include <type_traits>
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                            */
@@ -28,6 +30,24 @@
 static inline double clamp01(double v)
 {
 	return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v);
+}
+
+enum PixelDepth { PD_8 = 0, PD_16, PD_32 };
+
+static inline double DepthMax(PixelDepth d)
+{
+	return d == PD_32 ? 1.0 : (d == PD_16 ? (double)PF_MAX_CHAN16 : (double)PF_MAX_CHAN8);
+}
+
+/* Write a normalised [0,1] channel value into the destination type:
+   round+scale for integer worlds, store directly (clamped) for float. */
+template <typename C>
+static inline C StoreChan(double norm, double maxv)
+{
+	if (std::is_floating_point<C>::value)
+		return (C)(clamp01(norm));
+	else
+		return (C)(clamp01(norm) * maxv + 0.5);
 }
 
 /* Full-saturation, full-value HSV -> RGB. hue in [0,360). */
@@ -143,10 +163,10 @@ static void CompositeWorld(const PF_EffectWorld *src,
 				double ob  = db + base_b * o.maskB;
 				double oa  = da + aIn * o.alphaW;
 
-				dp->alpha = (decltype(dp->alpha))(clamp01(oa)  * maxv + 0.5);
-				dp->red   = (decltype(dp->red))  (clamp01(orr) * maxv + 0.5);
-				dp->green = (decltype(dp->green))(clamp01(og)  * maxv + 0.5);
-				dp->blue  = (decltype(dp->blue)) (clamp01(ob)  * maxv + 0.5);
+				dp->alpha = StoreChan<decltype(dp->alpha)>(oa,  maxv);
+				dp->red   = StoreChan<decltype(dp->red)>  (orr, maxv);
+				dp->green = StoreChan<decltype(dp->green)>(og,  maxv);
+				dp->blue  = StoreChan<decltype(dp->blue)> (ob,  maxv);
 			} else {
 				/* Source-over. */
 				double cr = sr, cg = sg, cb = sb, ca = sa;
@@ -163,10 +183,10 @@ static void CompositeWorld(const PF_EffectWorld *src,
 				double og  = cg * ae + dg * inv;
 				double ob  = cb * ae + db * inv;
 
-				dp->alpha = (decltype(dp->alpha))(clamp01(oa)  * maxv + 0.5);
-				dp->red   = (decltype(dp->red))  (clamp01(orr) * maxv + 0.5);
-				dp->green = (decltype(dp->green))(clamp01(og)  * maxv + 0.5);
-				dp->blue  = (decltype(dp->blue)) (clamp01(ob)  * maxv + 0.5);
+				dp->alpha = StoreChan<decltype(dp->alpha)>(oa,  maxv);
+				dp->red   = StoreChan<decltype(dp->red)>  (orr, maxv);
+				dp->green = StoreChan<decltype(dp->green)>(og,  maxv);
+				dp->blue  = StoreChan<decltype(dp->blue)> (ob,  maxv);
 			}
 		}
 	}
@@ -174,11 +194,15 @@ static void CompositeWorld(const PF_EffectWorld *src,
 
 static void CompositeDispatch(const PF_EffectWorld *src,
 							  PF_EffectWorld       *dst,
-							  bool                  deep,
+							  PixelDepth            depth,
 							  const GhostOptions   &o)
 {
-	if (deep) CompositeWorld<PF_Pixel16>(src, dst, (double)PF_MAX_CHAN16, o);
-	else      CompositeWorld<PF_Pixel8> (src, dst, (double)PF_MAX_CHAN8,  o);
+	double maxv = DepthMax(depth);
+	switch (depth) {
+		case PD_32: CompositeWorld<PF_Pixel32>(src, dst, maxv, o); break;
+		case PD_16: CompositeWorld<PF_Pixel16>(src, dst, maxv, o); break;
+		default:    CompositeWorld<PF_Pixel8> (src, dst, maxv, o); break;
+	}
 }
 
 /* ------------------------------------------------------------------ */
@@ -202,7 +226,9 @@ GlobalSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_
 	out_data->out_flags  = PF_OutFlag_WIDE_TIME_INPUT |	// we sample other times
 						   PF_OutFlag_DEEP_COLOR_AWARE;	// 8- and 16-bpc
 
-	out_data->out_flags2 = PF_OutFlag2_SUPPORTS_THREADED_RENDERING;
+	out_data->out_flags2 = PF_OutFlag2_SUPPORTS_SMART_RENDER |	// SmartFX (enables 32-bpc)
+						   PF_OutFlag2_FLOAT_COLOR_AWARE     |	// 32-bpc float
+						   PF_OutFlag2_SUPPORTS_THREADED_RENDERING;
 
 	return PF_Err_NONE;
 }
@@ -274,19 +300,23 @@ static void LerpWorldT(const PF_EffectWorld *a, const PF_EffectWorld *b,
 		const PixT *br = (const PixT *)((const char *)b->data + (size_t)y * b->rowbytes);
 		PixT       *dr = (PixT *)((char *)dst->data + (size_t)y * dst->rowbytes);
 		for (int x = 0; x < width; ++x) {
-			dr[x].alpha = (decltype(dr[x].alpha))(clamp01((ar[x].alpha * it + br[x].alpha * t) / maxv) * maxv + 0.5);
-			dr[x].red   = (decltype(dr[x].red))  (clamp01((ar[x].red   * it + br[x].red   * t) / maxv) * maxv + 0.5);
-			dr[x].green = (decltype(dr[x].green))(clamp01((ar[x].green * it + br[x].green * t) / maxv) * maxv + 0.5);
-			dr[x].blue  = (decltype(dr[x].blue)) (clamp01((ar[x].blue  * it + br[x].blue  * t) / maxv) * maxv + 0.5);
+			dr[x].alpha = StoreChan<decltype(dr[x].alpha)>((ar[x].alpha * it + br[x].alpha * t) / maxv, maxv);
+			dr[x].red   = StoreChan<decltype(dr[x].red)>  ((ar[x].red   * it + br[x].red   * t) / maxv, maxv);
+			dr[x].green = StoreChan<decltype(dr[x].green)>((ar[x].green * it + br[x].green * t) / maxv, maxv);
+			dr[x].blue  = StoreChan<decltype(dr[x].blue)> ((ar[x].blue  * it + br[x].blue  * t) / maxv, maxv);
 		}
 	}
 }
 
 static void LerpWorld(const PF_EffectWorld *a, const PF_EffectWorld *b,
-					  PF_EffectWorld *dst, bool deep, double t)
+					  PF_EffectWorld *dst, PixelDepth depth, double t)
 {
-	if (deep) LerpWorldT<PF_Pixel16>(a, b, dst, (double)PF_MAX_CHAN16, t);
-	else      LerpWorldT<PF_Pixel8> (a, b, dst, (double)PF_MAX_CHAN8,  t);
+	double maxv = DepthMax(depth);
+	switch (depth) {
+		case PD_32: LerpWorldT<PF_Pixel32>(a, b, dst, maxv, t); break;
+		case PD_16: LerpWorldT<PF_Pixel16>(a, b, dst, maxv, t); break;
+		default:    LerpWorldT<PF_Pixel8> (a, b, dst, maxv, t); break;
+	}
 }
 
 /*
@@ -303,14 +333,41 @@ static void LerpWorld(const PF_EffectWorld *a, const PF_EffectWorld *b,
 
 	The continuous Tint parameter cross-fades between these two looks.
 */
-static PF_Err
-Compose(PF_InData *in_data, PF_ParamDef *params[], PF_EffectWorld *dst, bool deep,
-		A_long before, A_long after, double onionOp, bool fade, bool edge,
-		double edgeGain, bool chroma)
-{
-	PF_Err err = PF_Err_NONE, err2 = PF_Err_NONE;
+/* Parameters read once for a render. */
+struct OnionParams {
+	A_long	before;
+	A_long	after;
+	double	tint;		// 0 = Opacity, 1 = Chroma
+	double	onionOp;
+	bool	fade;
+	bool	edge;
+	double	edgeGain;
+};
 
-	A_long maxDist = (before > after ? before : after);
+/*
+	Render one onion-skin look into dst, pulling each frame from worlds[] where
+	index = signedFrames + before (so the current frame is worlds[before]).
+
+	chroma == false (Opacity): the current frame is the opaque base, ghost frames
+	         are overlaid "over" at reduced opacity.
+
+	chroma == true  (Chroma): every frame — including the current one as the
+	         middle (green) frame — is tinted red(past)->green(now)->blue(future)
+	         and combined ADDITIVELY, with per-channel masks normalised so that
+	         where all frames agree the original colour is reconstructed and
+	         motion shows as coloured fringes.
+
+	The continuous Tint parameter cross-fades between these two looks.
+*/
+static PF_Err
+ComposeOnion(PF_InData *in_data, PF_EffectWorld **worlds,
+			 PF_EffectWorld *dst, PixelDepth depth,
+			 const OnionParams &p, bool chroma)
+{
+	PF_Err err = PF_Err_NONE;
+
+	A_long maxDist = (p.before > p.after ? p.before : p.after);
+	PF_EffectWorld *current = worlds[p.before];	// offset 0
 
 	/* Start from transparent black. */
 	ERR(PF_FILL(NULL, NULL, dst));
@@ -323,20 +380,20 @@ Compose(PF_InData *in_data, PF_ParamDef *params[], PF_EffectWorld *dst, bool dee
 		Otherwise (pure Chroma) the current frame is blended into the additive
 		stack as the middle/green frame instead.
 	*/
-	bool currentAsBase = (!chroma) || edge;
+	bool currentAsBase = (!chroma) || p.edge;
 
-	if (currentAsBase && !err && params[CO_INPUT]->u.ld.data) {
+	if (currentAsBase && !err && current && current->data) {
 		GhostOptions o;
 		AEFX_CLR_STRUCT(o);
 		o.mode   = COMP_OVER;
 		o.weight = 1.0;
 		o.edge   = false;
-		CompositeDispatch(&params[CO_INPUT]->u.ld, dst, deep, o);
+		CompositeDispatch(current, dst, depth, o);
 	}
 
 	/* Build the frame list (one frame per step of 1). */
 	std::vector<Ghost> ghosts;
-	for (A_long i = 1; i <= before; ++i) {
+	for (A_long i = 1; i <= p.before; ++i) {
 		Ghost g;
 		g.signedFrames = -i;
 		g.dist         = i;
@@ -344,7 +401,7 @@ Compose(PF_InData *in_data, PF_ParamDef *params[], PF_EffectWorld *dst, bool dee
 		g.hue = (t + 1.0) * 0.5 * 240.0;	// past -> red(0)
 		ghosts.push_back(g);
 	}
-	for (A_long i = 1; i <= after; ++i) {
+	for (A_long i = 1; i <= p.after; ++i) {
 		Ghost g;
 		g.signedFrames = i;
 		g.dist         = i;
@@ -364,8 +421,8 @@ Compose(PF_InData *in_data, PF_ParamDef *params[], PF_EffectWorld *dst, bool dee
 
 	/* Per-frame weight (onion opacity * distance fade). */
 	for (size_t n = 0; n < ghosts.size(); ++n) {
-		double w = onionOp;
-		if (fade && maxDist > 0) {
+		double w = p.onionOp;
+		if (p.fade && maxDist > 0) {
 			double frac = (double)ghosts[n].dist / (double)maxDist;	// [0,1]
 			w *= (1.0 - 0.75 * frac);
 		}
@@ -389,89 +446,189 @@ Compose(PF_InData *in_data, PF_ParamDef *params[], PF_EffectWorld *dst, bool dee
 	std::sort(ghosts.begin(), ghosts.end(),
 			  [](const Ghost &a, const Ghost &b) { return a.dist > b.dist; });
 
-	for (size_t n = 0; n < ghosts.size() && !err; ++n) {
+	for (size_t n = 0; n < ghosts.size(); ++n) {
 		const Ghost &g = ghosts[n];
+		PF_EffectWorld *src = worlds[g.signedFrames + p.before];
+		if (!src || !src->data) continue;
 
-		PF_ParamDef     cp;
-		bool            checked = false;
-		PF_EffectWorld *src     = NULL;
+		GhostOptions o;
+		AEFX_CLR_STRUCT(o);
+		/* The current frame is shown as-is; only the surrounding frames get
+		   edge detection, overlaid on top of it. */
+		o.edge     = p.edge && (g.signedFrames != 0);
+		o.edgeGain = p.edgeGain;
 
-		if (g.signedFrames == 0) {
-			src = &params[CO_INPUT]->u.ld;	// current frame, no checkout needed
+		if (chroma) {
+			o.mode = COMP_ADD;
+			double mr, mg, mb;
+			HueToRGB(g.hue, &mr, &mg, &mb);
+			o.maskR  = (sMaskR > 1e-6) ? mr * g.weight / sMaskR : 0.0;
+			o.maskG  = (sMaskG > 1e-6) ? mg * g.weight / sMaskG : 0.0;
+			o.maskB  = (sMaskB > 1e-6) ? mb * g.weight / sMaskB : 0.0;
+			o.alphaW = (sumW   > 1e-6) ? g.weight / sumW         : 0.0;
 		} else {
-			AEFX_CLR_STRUCT(cp);
-			A_long when = in_data->current_time + g.signedFrames * in_data->time_step;
-			ERR(PF_CHECKOUT_PARAM(in_data, CO_INPUT, when,
-								  in_data->time_step, in_data->time_scale, &cp));
-			checked = true;
-			if (!err) src = &cp.u.ld;
+			o.mode   = COMP_OVER;
+			o.weight = g.weight;
 		}
 
-		if (!err && src && src->data) {
-			GhostOptions o;
-			AEFX_CLR_STRUCT(o);
-			/* The current frame is shown as-is; only the surrounding frames
-			   get edge detection, overlaid on top of it. */
-			o.edge     = edge && (g.signedFrames != 0);
-			o.edgeGain = edgeGain;
-
-			if (chroma) {
-				o.mode = COMP_ADD;
-				double mr, mg, mb;
-				HueToRGB(g.hue, &mr, &mg, &mb);
-				o.maskR  = (sMaskR > 1e-6) ? mr * g.weight / sMaskR : 0.0;
-				o.maskG  = (sMaskG > 1e-6) ? mg * g.weight / sMaskG : 0.0;
-				o.maskB  = (sMaskB > 1e-6) ? mb * g.weight / sMaskB : 0.0;
-				o.alphaW = (sumW   > 1e-6) ? g.weight / sumW         : 0.0;
-			} else {
-				o.mode   = COMP_OVER;
-				o.weight = g.weight;
-			}
-
-			CompositeDispatch(src, dst, deep, o);
-		}
-
-		if (checked) ERR2(PF_CHECKIN_PARAM(in_data, &cp));
+		CompositeDispatch(src, dst, depth, o);
 	}
 
 	return err;
 }
 
+/* Render both looks (as needed) and cross-fade by Tint into the output. */
 static PF_Err
-Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_LayerDef *output)
+RenderOnion(PF_InData *in_data, PF_OutData *out_data, const PF_WorldSuite2 *wsP,
+			PF_EffectWorld **worlds, PF_EffectWorld *output,
+			PixelDepth depth, PF_PixelFormat format, const OnionParams &p)
 {
 	PF_Err err = PF_Err_NONE;
-
-	A_long before  = params[CO_FRAMES_BEFORE]->u.sd.value;
-	A_long after   = params[CO_FRAMES_AFTER]->u.sd.value;
-	double tint    = params[CO_TINT]->u.sd.value / 100.0;	// 0 = Opacity, 1 = Chroma
-	double onionOp = params[CO_ONION_OPACITY]->u.sd.value / 100.0;
-	bool   fade    = params[CO_FADE_BY_DISTANCE]->u.bd.value != 0;
-	bool   edge    = params[CO_EDGE_DETECT]->u.bd.value != 0;
-	double edgeGn  = params[CO_EDGE_INTENSITY]->u.fs_d.value;
-	bool   deep    = PF_WORLD_IS_DEEP(output);
-
 	const double EPS = 0.001;
 
-	if (tint <= EPS) {
-		err = Compose(in_data, params, output, deep, before, after, onionOp, fade, edge, edgeGn, false);
-	} else if (tint >= 1.0 - EPS) {
-		err = Compose(in_data, params, output, deep, before, after, onionOp, fade, edge, edgeGn, true);
+	if (p.tint <= EPS) {
+		err = ComposeOnion(in_data, worlds, output, depth, p, false);
+	} else if (p.tint >= 1.0 - EPS) {
+		err = ComposeOnion(in_data, worlds, output, depth, p, true);
 	} else {
 		/* Cross-fade: Opacity look in output, Chroma look in a temp world. */
-		err = Compose(in_data, params, output, deep, before, after, onionOp, fade, edge, edgeGn, false);
-
+		err = ComposeOnion(in_data, worlds, output, depth, p, false);
 		if (!err) {
 			PF_EffectWorld temp;
 			AEFX_CLR_STRUCT(temp);
-			PF_NewWorldFlags flags = (PF_NewWorldFlags)(deep ? PF_NewWorldFlag_DEEP_PIXELS : PF_NewWorldFlag_NONE);
-			err = PF_NEW_WORLD(output->width, output->height, flags, &temp);
+			err = wsP->PF_NewWorld(in_data->effect_ref, output->width, output->height,
+								   TRUE, format, &temp);
 			if (!err) {
-				err = Compose(in_data, params, &temp, deep, before, after, onionOp, fade, edge, edgeGn, true);
-				if (!err) LerpWorld(output, &temp, output, deep, tint);
-				PF_DISPOSE_WORLD(&temp);
+				err = ComposeOnion(in_data, worlds, &temp, depth, p, true);
+				if (!err) LerpWorld(output, &temp, output, depth, p.tint);
+				wsP->PF_DisposeWorld(in_data->effect_ref, &temp);
 			}
 		}
+	}
+	return err;
+}
+
+/* Read a slider (int) or checkbox param at the current time as a long. */
+static A_long ReadIntParam(PF_InData *in_data, int index)
+{
+	PF_ParamDef def; AEFX_CLR_STRUCT(def);
+	A_long v = 0;
+	if (!PF_CHECKOUT_PARAM(in_data, index, in_data->current_time,
+						   in_data->time_step, in_data->time_scale, &def)) {
+		switch (def.param_type) {
+			case PF_Param_CHECKBOX:     v = def.u.bd.value; break;
+			case PF_Param_FLOAT_SLIDER: v = (A_long)def.u.fs_d.value; break;
+			default:                    v = def.u.sd.value; break;	// PF_Param_SLIDER
+		}
+	}
+	PF_CHECKIN_PARAM(in_data, &def);
+	return v;
+}
+
+/* Merge src into dst (both PF_LRect); empties handled. */
+static void UnionLRect(const PF_LRect *src, PF_LRect *dst)
+{
+	bool srcEmpty = (src->left >= src->right) || (src->top >= src->bottom);
+	if (srcEmpty) return;
+	bool dstEmpty = (dst->left >= dst->right) || (dst->top >= dst->bottom);
+	if (dstEmpty) { *dst = *src; return; }
+	if (src->left   < dst->left)   dst->left   = src->left;
+	if (src->top    < dst->top)    dst->top    = src->top;
+	if (src->right  > dst->right)  dst->right  = src->right;
+	if (src->bottom > dst->bottom) dst->bottom = src->bottom;
+}
+
+static PF_Err
+PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderExtra *extra)
+{
+	PF_Err err = PF_Err_NONE;
+
+	A_long before = ReadIntParam(in_data, CO_FRAMES_BEFORE);
+	A_long after  = ReadIntParam(in_data, CO_FRAMES_AFTER);
+	if (before < 0) before = 0;
+	if (after  < 0) after  = 0;
+
+	PF_RenderRequest req = extra->input->output_request;
+
+	PF_LRect resultR = {0, 0, 0, 0};
+	PF_LRect maxR    = {0, 0, 0, 0};
+	bool     first   = true;
+
+	for (A_long off = -before; off <= after && !err; ++off) {
+		A_long          checkout_id = off + before;
+		A_long          when        = in_data->current_time + off * in_data->time_step;
+		PF_CheckoutResult res;
+		AEFX_CLR_STRUCT(res);
+
+		ERR(extra->cb->checkout_layer(in_data->effect_ref, CO_INPUT, checkout_id,
+									  &req, when, in_data->time_step,
+									  in_data->time_scale, &res));
+		if (err) break;
+
+		if (first) {
+			resultR = res.result_rect;
+			maxR    = res.max_result_rect;
+			first   = false;
+		} else {
+			UnionLRect(&res.result_rect,     &resultR);
+			UnionLRect(&res.max_result_rect, &maxR);
+		}
+	}
+
+	extra->output->result_rect     = resultR;
+	extra->output->max_result_rect = maxR;
+	extra->output->solid           = FALSE;
+	extra->output->flags           = 0;
+
+	return err;
+}
+
+static PF_Err
+SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra)
+{
+	PF_Err err = PF_Err_NONE, err2 = PF_Err_NONE;
+
+	OnionParams p;
+	p.before   = ReadIntParam(in_data, CO_FRAMES_BEFORE);
+	p.after    = ReadIntParam(in_data, CO_FRAMES_AFTER);
+	if (p.before < 0) p.before = 0;
+	if (p.after  < 0) p.after  = 0;
+	p.tint     = ReadIntParam(in_data, CO_TINT) / 100.0;
+	p.onionOp  = ReadIntParam(in_data, CO_ONION_OPACITY) / 100.0;
+	p.fade     = ReadIntParam(in_data, CO_FADE_BY_DISTANCE) != 0;
+	p.edge     = ReadIntParam(in_data, CO_EDGE_DETECT) != 0;
+
+	{	/* Edge Intensity is a float param. */
+		PF_ParamDef def; AEFX_CLR_STRUCT(def);
+		p.edgeGain = 2.0;
+		if (!PF_CHECKOUT_PARAM(in_data, CO_EDGE_INTENSITY, in_data->current_time,
+							   in_data->time_step, in_data->time_scale, &def)) {
+			p.edgeGain = def.u.fs_d.value;
+		}
+		PF_CHECKIN_PARAM(in_data, &def);
+	}
+
+	AEFX_SuiteScoper<PF_WorldSuite2> wsP =
+		AEFX_SuiteScoper<PF_WorldSuite2>(in_data, kPFWorldSuite, kPFWorldSuiteVersion2, out_data);
+
+	PF_EffectWorld *output = NULL;
+	ERR(extra->cb->checkout_output(in_data->effect_ref, &output));
+
+	PF_PixelFormat format = PF_PixelFormat_ARGB32;
+	if (!err && output) ERR(wsP->PF_GetPixelFormat(output, &format));
+
+	PixelDepth depth = (format == PF_PixelFormat_ARGB128) ? PD_32
+					 : (format == PF_PixelFormat_ARGB64)  ? PD_16
+					 : PD_8;
+
+	A_long count = p.before + p.after + 1;
+	std::vector<PF_EffectWorld *> worlds(count, (PF_EffectWorld *)NULL);
+	for (A_long i = 0; i < count && !err; ++i) {
+		ERR(extra->cb->checkout_layer_pixels(in_data->effect_ref, i, &worlds[i]));
+	}
+
+	if (!err && output) {
+		err = RenderOnion(in_data, out_data, wsP.get(), worlds.data(), output, depth, format, p);
 	}
 
 	return err;
@@ -506,7 +663,8 @@ EffectMain(
 	PF_InData	*in_data,
 	PF_OutData	*out_data,
 	PF_ParamDef	*params[],
-	PF_LayerDef	*output)
+	PF_LayerDef	*output,
+	void		*extra)
 {
 	PF_Err err = PF_Err_NONE;
 
@@ -515,7 +673,12 @@ EffectMain(
 			case PF_Cmd_ABOUT:        err = About(in_data, out_data, params, output);       break;
 			case PF_Cmd_GLOBAL_SETUP: err = GlobalSetup(in_data, out_data, params, output); break;
 			case PF_Cmd_PARAMS_SETUP: err = ParamsSetup(in_data, out_data, params, output); break;
-			case PF_Cmd_RENDER:       err = Render(in_data, out_data, params, output);      break;
+			case PF_Cmd_SMART_PRE_RENDER:
+				err = PreRender(in_data, out_data, (PF_PreRenderExtra *)extra);
+				break;
+			case PF_Cmd_SMART_RENDER:
+				err = SmartRender(in_data, out_data, (PF_SmartRenderExtra *)extra);
+				break;
 			default: break;
 		}
 	} catch (PF_Err &thrown_err) {
