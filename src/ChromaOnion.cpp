@@ -91,12 +91,8 @@ static inline double EdgeMag(const PF_EffectWorld *w, int x, int y, double maxv)
 
 	double gx = (l20 + 2 * l21 + l22) - (l00 + 2 * l01 + l02);
 	double gy = (l02 + 2 * l12 + l22) - (l00 + 2 * l10 + l20);
-	double mag = std::sqrt(gx * gx + gy * gy) * 8.0;	// high gain
-
-	mag = clamp01(mag);
-	/* Contrast curve: push toward 0/1 so edges read as crisp lines. */
-	mag = mag * mag * (3.0 - 2.0 * mag);	// smoothstep
-	return mag;
+	double mag = std::sqrt(gx * gx + gy * gy) * 2.0;	// moderate gain
+	return clamp01(mag);
 }
 
 /* Composite one source world onto the destination. */
