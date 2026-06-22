@@ -188,11 +188,6 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_
 				  FRAMES_AFTER_DISK_ID);
 
 	AEFX_CLR_STRUCT(def);
-	PF_ADD_SLIDER("Frame Step", FRAME_STEP_MIN, FRAME_STEP_MAX,
-				  FRAME_STEP_MIN, FRAME_STEP_MAX, FRAME_STEP_DFLT,
-				  FRAME_STEP_DISK_ID);
-
-	AEFX_CLR_STRUCT(def);
 	PF_ADD_POPUP("Color Mode", 2, COLOR_MODE_OPACITY,
 				 "Opacity|Chroma (Rainbow)", COLOR_MODE_DISK_ID);
 
@@ -212,9 +207,6 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_CHECKBOX("Edge Detect", "", FALSE, 0, EDGE_DETECT_DISK_ID);
 
-	AEFX_CLR_STRUCT(def);
-	PF_ADD_CHECKBOX("Show Current Frame", "", TRUE, 0, SHOW_CURRENT_DISK_ID);
-
 	out_data->num_params = CO_NUM_PARAMS;
 	return err;
 }
@@ -232,15 +224,12 @@ Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_Layer
 
 	A_long before  = params[CO_FRAMES_BEFORE]->u.sd.value;
 	A_long after   = params[CO_FRAMES_AFTER]->u.sd.value;
-	A_long step    = params[CO_FRAME_STEP]->u.sd.value;
-	if (step < 1) step = 1;
 
 	A_long colorMode = params[CO_COLOR_MODE]->u.pd.value;
 	double onionOp   = params[CO_ONION_OPACITY]->u.sd.value / 100.0;
 	bool   fade      = params[CO_FADE_BY_DISTANCE]->u.bd.value != 0;
 	double tintAmt   = params[CO_TINT_AMOUNT]->u.sd.value / 100.0;
 	bool   edge      = params[CO_EDGE_DETECT]->u.bd.value != 0;
-	bool   showCur   = params[CO_SHOW_CURRENT]->u.bd.value != 0;
 	bool   chroma    = (colorMode == COLOR_MODE_CHROMA);
 
 	bool   deep      = PF_WORLD_IS_DEEP(output);
@@ -248,25 +237,23 @@ Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_Layer
 	/* Start from transparent black. */
 	ERR(PF_FILL(NULL, NULL, output));
 
-	A_long maxDist = (before > after ? before : after) * step;
+	A_long maxDist = (before > after ? before : after);
 
-	/* Build the ghost list. */
+	/* Build the ghost list (one frame per step of 1). */
 	std::vector<Ghost> ghosts;
 	for (A_long i = 1; i <= before; ++i) {
-		A_long fo = i * step;
 		Ghost g;
-		g.signedFrames = -fo;
-		g.dist         = fo;
-		double t = (maxDist > 0) ? (double)(-fo) / (double)maxDist : 0.0;	// -1..0
+		g.signedFrames = -i;
+		g.dist         = i;
+		double t = (maxDist > 0) ? (double)(-i) / (double)maxDist : 0.0;	// -1..0
 		g.hue = (t + 1.0) * 0.5 * 240.0;	// past -> red(0)
 		ghosts.push_back(g);
 	}
 	for (A_long i = 1; i <= after; ++i) {
-		A_long fo = i * step;
 		Ghost g;
-		g.signedFrames = fo;
-		g.dist         = fo;
-		double t = (maxDist > 0) ? (double)(fo) / (double)maxDist : 0.0;		// 0..1
+		g.signedFrames = i;
+		g.dist         = i;
+		double t = (maxDist > 0) ? (double)(i) / (double)maxDist : 0.0;	// 0..1
 		g.hue = (t + 1.0) * 0.5 * 240.0;	// future -> blue(240)
 		ghosts.push_back(g);
 	}
@@ -304,17 +291,6 @@ Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_Layer
 		}
 
 		ERR2(PF_CHECKIN_PARAM(in_data, &cp));
-	}
-
-	/* Current frame on top, untinted, full opacity. */
-	if (!err && showCur && params[CO_INPUT]->u.ld.data) {
-		GhostOptions o;
-		o.weight = 1.0;
-		o.chroma = false;
-		o.tintAmt = 0.0;
-		o.edge = false;
-		o.tintR = o.tintG = o.tintB = 1.0;
-		CompositeDispatch(&params[CO_INPUT]->u.ld, output, deep, o);
 	}
 
 	return err;

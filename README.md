@@ -6,7 +6,7 @@ Like the built-in **Echo** effect, ChromaOnion overlays surrounding frames — b
 it is built for *checking animation*, not for trails:
 
 - **Independent before/after ranges** — choose how many frames to overlay on each
-  side of the current time, plus a frame step.
+  side of the current time.
 - **Color modes**
   - **Opacity** — plain reduced-opacity ghosting, with optional fade by distance.
   - **Chroma (Rainbow)** — past frames are tinted toward **red**, future frames
@@ -49,13 +49,15 @@ Restart After Effects; the effect appears under **Effect ▸ Utility ▸ ChromaO
 | Parameter | Meaning |
 |---|---|
 | Frames Before / After | How many frames to overlay on each side (0–30). |
-| Frame Step | Spacing between sampled frames (1 = every frame). |
 | Color Mode | Opacity, or Chroma (rainbow past→red / future→blue). |
 | Onion Opacity | Overall opacity of the ghost frames. |
 | Fade By Distance | Farther frames fade out. |
 | Tint Amount | Strength of the chroma tint. |
 | Edge Detect | Overlay edge detection instead of solid frames. |
-| Show Current Frame | Draw the real current frame on top at full opacity. |
+
+The current frame itself is not drawn — only the surrounding ghost frames — so the
+onion skin stays visible even on opaque footage. Apply on an adjustment layer (or a
+layer above your footage) to see ghosts over the live frame.
 
 ## How it works
 

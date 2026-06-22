@@ -26,7 +26,7 @@
 #define MINOR_VERSION	1
 #define BUG_VERSION		0
 #define STAGE_VERSION	PF_Stage_DEVELOP
-#define BUILD_VERSION	1
+#define BUILD_VERSION	2
 
 #define NAME			"ChromaOnion"
 #define DESCRIPTION		"Onion-skin preview: composite frames before/after the current time, \
@@ -39,27 +39,23 @@ enum {
 	CO_INPUT = 0,
 	CO_FRAMES_BEFORE,
 	CO_FRAMES_AFTER,
-	CO_FRAME_STEP,
 	CO_COLOR_MODE,		// popup: 1 = Opacity, 2 = Chroma (rainbow)
 	CO_ONION_OPACITY,	// 0..100
 	CO_FADE_BY_DISTANCE,// checkbox
 	CO_TINT_AMOUNT,		// 0..100 (chroma strength)
 	CO_EDGE_DETECT,		// checkbox
-	CO_SHOW_CURRENT,	// checkbox
 	CO_NUM_PARAMS
 };
 
-/* Unique, stable disk IDs for each param. */
+/* Unique, stable disk IDs for each param (gaps left for removed params). */
 enum {
 	FRAMES_BEFORE_DISK_ID = 1,
-	FRAMES_AFTER_DISK_ID,
-	FRAME_STEP_DISK_ID,
-	COLOR_MODE_DISK_ID,
-	ONION_OPACITY_DISK_ID,
-	FADE_BY_DISTANCE_DISK_ID,
-	TINT_AMOUNT_DISK_ID,
-	EDGE_DETECT_DISK_ID,
-	SHOW_CURRENT_DISK_ID
+	FRAMES_AFTER_DISK_ID = 2,
+	COLOR_MODE_DISK_ID = 4,
+	ONION_OPACITY_DISK_ID = 5,
+	FADE_BY_DISTANCE_DISK_ID = 6,
+	TINT_AMOUNT_DISK_ID = 7,
+	EDGE_DETECT_DISK_ID = 8
 };
 
 enum {
@@ -75,10 +71,6 @@ enum {
 #define FRAMES_AFTER_MIN	0
 #define FRAMES_AFTER_MAX	30
 #define FRAMES_AFTER_DFLT	3
-
-#define FRAME_STEP_MIN		1
-#define FRAME_STEP_MAX		10
-#define FRAME_STEP_DFLT		1
 
 #define ONION_OPACITY_MIN	0
 #define ONION_OPACITY_MAX	100
