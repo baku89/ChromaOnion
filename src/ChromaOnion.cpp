@@ -611,6 +611,14 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
 	AEFX_SuiteScoper<PF_WorldSuite2> wsP =
 		AEFX_SuiteScoper<PF_WorldSuite2>(in_data, kPFWorldSuite, kPFWorldSuiteVersion2, out_data);
 
+	/* Check out the input layer pixels first — AE requires at least one input
+	   checkout before checking out the output. */
+	A_long count = p.before + p.after + 1;
+	std::vector<PF_EffectWorld *> worlds(count, (PF_EffectWorld *)NULL);
+	for (A_long i = 0; i < count && !err; ++i) {
+		ERR(extra->cb->checkout_layer_pixels(in_data->effect_ref, i, &worlds[i]));
+	}
+
 	PF_EffectWorld *output = NULL;
 	ERR(extra->cb->checkout_output(in_data->effect_ref, &output));
 
@@ -620,12 +628,6 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
 	PixelDepth depth = (format == PF_PixelFormat_ARGB128) ? PD_32
 					 : (format == PF_PixelFormat_ARGB64)  ? PD_16
 					 : PD_8;
-
-	A_long count = p.before + p.after + 1;
-	std::vector<PF_EffectWorld *> worlds(count, (PF_EffectWorld *)NULL);
-	for (A_long i = 0; i < count && !err; ++i) {
-		ERR(extra->cb->checkout_layer_pixels(in_data->effect_ref, i, &worlds[i]));
-	}
 
 	if (!err && output) {
 		err = RenderOnion(in_data, out_data, wsP.get(), worlds.data(), output, depth, format, p);
